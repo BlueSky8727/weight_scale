@@ -1,0 +1,120 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "HX711.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// HX711
+#define DT_PIN 4
+#define SCK_PIN 5
+HX711 scale;
+
+// OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// BLE UUIDs
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+BLECharacteristic *pCharacteristic;
+bool deviceConnected = false;
+
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("✅ BLE device connected");
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("❌ BLE device disconnected");
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+
+  // HX711 Init
+  scale.begin(DT_PIN, SCK_PIN);
+  scale.set_scale(2280.f); // ปรับตามค่าจริงของ load cell
+  scale.tare(); // ปรับศูนย์
+
+  // OLED Init
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("❌ SSD1306 OLED allocation failed");
+    while (true); // ค้าง
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  display.print("Initializing...");
+  display.display();
+
+  // BLE Init
+  BLEDevice::init("ESP32-Scale");
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+
+  pServer->getAdvertising()->start();
+  Serial.println("📡 BLE ready & advertising!");
+
+  display.clearDisplay();
+  display.setCursor(0, 10);
+  display.print("BLE Ready...");
+  display.display();
+}
+
+void loop() {
+  if (scale.is_ready()) {
+    long weight_raw = scale.get_units(10);
+    float weightKg = weight_raw / 1000.0; // ปรับหน่วยให้ดูดี
+
+    // Serial log
+    Serial.print("📦 Weight: ");
+    Serial.print(weightKg, 2);
+    Serial.println(" kg");
+
+    // OLED Display
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(0, 20);
+    display.print(weightKg, 2);
+    display.print(" kg");
+    display.display();
+
+    // BLE notify
+    if (deviceConnected) {
+      char buffer[8];
+      dtostrf(weightKg, 4, 2, buffer);
+      pCharacteristic->setValue(buffer);
+      pCharacteristic->notify();
+    }
+  } else {
+    Serial.println("⚠️ HX711 not found.");
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 10);
+    display.print("HX711 not found.");
+    display.display();
+  }
+
+  delay(1000); // รอ 1 วิ
+}
